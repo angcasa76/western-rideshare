@@ -1,31 +1,66 @@
 import os
-from datetime import date, datetime, time, timedelta, timezone
+import time as time_module
+from datetime import (
+    date,
+    datetime,
+    time,
+    timedelta,
+    timezone,
+)
+
+import httpx
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+)
+
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+)
+
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.database import models
-from app.database.database import Base, engine, get_db
-from app.schemas import RideCreate, RideUpdate, UserCreate, UserLogin
 
+from app.database.database import (
+    Base,
+    engine,
+    get_db,
+)
 
-# ---------------------------------------------------------
-# SETUP
-# ---------------------------------------------------------
+from app.schemas import (
+    RideCreate,
+    RideRequestCreate,
+    RideUpdate,
+    RoutePreviewRequest,
+    UserCreate,
+    UserLogin,
+    UserProfileUpdate,
+)
+
 
 load_dotenv()
 
 Base.metadata.create_all(bind=engine)
 
+
 app = FastAPI(
     title="Western Rideshare API",
-    version="1.0.0",
+    version="2.0.0",
 )
+
 
 pwd_context = CryptContext(
     schemes=["bcrypt"],
@@ -34,12 +69,18 @@ pwd_context = CryptContext(
 
 security = HTTPBearer()
 
+
 SECRET_KEY = os.getenv("SECRET_KEY")
+
 ALGORITHM = "HS256"
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
+
 if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY is not set")
+    raise RuntimeError(
+        "SECRET_KEY is not set"
+    )
 
 
 app.add_middleware(
@@ -47,8 +88,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -56,13 +95,266 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------------------
+# -------------------------------------------
+# PRICING
+# -------------------------------------------
 
-def create_access_token(user_id: int):
-    expiration = datetime.now(timezone.utc) + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+BASE_RIDE_PRICE = 3.50
+
+PRICE_PER_KM = 0.28
+
+MINIMUM_RIDE_PRICE = 6.00
+
+MAXIMUM_RIDE_PRICE = 40.00
+
+
+def calculate_ride_price(
+    distance_km: float,
+) -> float:
+
+    price = (
+        BASE_RIDE_PRICE
+        + distance_km * PRICE_PER_KM
+    )
+
+    price = max(
+        price,
+        MINIMUM_RIDE_PRICE,
+    )
+
+    price = min(
+        price,
+        MAXIMUM_RIDE_PRICE,
+    )
+
+    return round(
+        price,
+        2,
+    )
+
+
+# -------------------------------------------
+# MAP / GEOCODING
+# -------------------------------------------
+
+NOMINATIM_URL = (
+    "https://nominatim.openstreetmap.org/search"
+)
+
+OSRM_URL = (
+    "https://router.project-osrm.org"
+)
+
+GEOCODE_CACHE: dict[
+    str,
+    dict,
+] = {}
+
+LAST_GEOCODE_REQUEST = 0.0
+
+
+def geocode_address(
+    address: str,
+):
+
+    global LAST_GEOCODE_REQUEST
+
+    normalized_address = (
+        address
+        .strip()
+        .lower()
+    )
+
+    if normalized_address in GEOCODE_CACHE:
+        return GEOCODE_CACHE[
+            normalized_address
+        ]
+
+    elapsed = (
+        time_module.time()
+        - LAST_GEOCODE_REQUEST
+    )
+
+    if elapsed < 1.05:
+        time_module.sleep(
+            1.05 - elapsed
+        )
+
+    params = {
+        "q": address,
+        "format": "jsonv2",
+        "limit": 1,
+        "countrycodes": "ca",
+    }
+
+    headers = {
+        "User-Agent":
+            "WesternRideshare/2.0",
+    }
+
+    try:
+        with httpx.Client(
+            timeout=15.0,
+            headers=headers,
+        ) as client:
+
+            response = client.get(
+                NOMINATIM_URL,
+                params=params,
+            )
+
+            response.raise_for_status()
+
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Address service is "
+                "temporarily unavailable"
+            ),
+        )
+
+    LAST_GEOCODE_REQUEST = (
+        time_module.time()
+    )
+
+    results = response.json()
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Could not find address: "
+                f"{address}"
+            ),
+        )
+
+    result = results[0]
+
+    location = {
+        "display_name":
+            result["display_name"],
+
+        "lat":
+            float(result["lat"]),
+
+        "lon":
+            float(result["lon"]),
+    }
+
+    GEOCODE_CACHE[
+        normalized_address
+    ] = location
+
+    return location
+
+
+def calculate_route(
+    locations: list[dict],
+):
+
+    coordinates = ";".join(
+        f"{location['lon']},"
+        f"{location['lat']}"
+        for location in locations
+    )
+
+    url = (
+        f"{OSRM_URL}"
+        f"/route/v1/driving/"
+        f"{coordinates}"
+    )
+
+    params = {
+        "overview": "full",
+        "geometries": "geojson",
+        "steps": "false",
+    }
+
+    try:
+        with httpx.Client(
+            timeout=20.0,
+        ) as client:
+
+            response = client.get(
+                url,
+                params=params,
+            )
+
+            response.raise_for_status()
+
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Routing service is "
+                "temporarily unavailable"
+            ),
+        )
+
+    data = response.json()
+
+    if (
+        data.get("code")
+        != "Ok"
+        or not data.get("routes")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No driving route "
+                "could be found"
+            ),
+        )
+
+    route = data["routes"][0]
+
+    route_coordinates = [
+        [latitude, longitude]
+        for longitude, latitude
+        in route[
+            "geometry"
+        ][
+            "coordinates"
+        ]
+    ]
+
+    return {
+        "distance_km":
+            round(
+                route["distance"]
+                / 1000,
+                1,
+            ),
+
+        "duration_minutes":
+            round(
+                route["duration"]
+                / 60,
+                1,
+            ),
+
+        "route_geometry":
+            route_coordinates,
+    }
+
+
+# -------------------------------------------
+# AUTH
+# -------------------------------------------
+
+def create_access_token(
+    user_id: int,
+):
+
+    expiration = (
+        datetime.now(
+            timezone.utc
+        )
+        + timedelta(
+            minutes=
+                ACCESS_TOKEN_EXPIRE_MINUTES
+        )
     )
 
     payload = {
@@ -78,130 +370,304 @@ def create_access_token(user_id: int):
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db),
+    credentials:
+        HTTPAuthorizationCredentials
+        = Depends(security),
+
+    db: Session
+        = Depends(get_db),
 ):
-    token = credentials.credentials
+
+    token = (
+        credentials.credentials
+    )
 
     try:
         payload = jwt.decode(
             token,
             SECRET_KEY,
-            algorithms=[ALGORITHM],
+            algorithms=[
+                ALGORITHM
+            ],
         )
 
-        user_id = payload.get("sub")
+        user_id = payload.get(
+            "sub"
+        )
 
         if user_id is None:
             raise HTTPException(
                 status_code=401,
-                detail="Invalid authentication token",
+                detail=(
+                    "Invalid authentication "
+                    "token"
+                ),
             )
 
-        user_id = int(user_id)
-
-    except (JWTError, ValueError):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token",
+        user_id = int(
+            user_id
         )
 
-    db_user = (
-        db.query(models.User)
-        .filter(models.User.id == user_id)
+    except (
+        JWTError,
+        ValueError,
+    ):
+
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Invalid authentication "
+                "token"
+            ),
+        )
+
+    user = (
+        db.query(
+            models.User
+        )
+        .filter(
+            models.User.id
+            == user_id
+        )
         .first()
     )
 
-    if not db_user:
+    if not user:
         raise HTTPException(
             status_code=401,
             detail="User not found",
         )
 
-    return db_user
+    return user
 
 
-def serialize_driver(driver):
+# -------------------------------------------
+# SERIALIZERS
+# -------------------------------------------
+
+def serialize_driver(
+    driver,
+):
+
     return {
         "id": driver.id,
         "name": driver.name,
     }
 
 
-def serialize_passenger(passenger):
-    return {
-        "id": passenger.id,
-        "name": passenger.name,
-        "email": passenger.email,
-    }
+def serialize_ride(
+    ride,
+):
 
-
-def serialize_ride(ride):
     return {
         "id": ride.id,
-        "origin": ride.origin,
-        "destination": ride.destination,
-        "departure_time": ride.departure_time,
-        "available_seats": ride.available_seats,
-        "price_per_seat": ride.price_per_seat,
-        "status": ride.status,
-        "driver": serialize_driver(ride.driver),
+
+        "origin":
+            ride.origin,
+
+        "destination":
+            ride.destination,
+
+        "origin_lat":
+            ride.origin_lat,
+
+        "origin_lon":
+            ride.origin_lon,
+
+        "destination_lat":
+            ride.destination_lat,
+
+        "destination_lon":
+            ride.destination_lon,
+
+        "route_geometry":
+            ride.route_geometry,
+
+        "departure_time":
+            ride.departure_time,
+
+        "distance_km":
+            ride.distance_km,
+
+        "duration_minutes":
+            ride.duration_minutes,
+
+        "available_seats":
+            ride.available_seats,
+
+        "price_per_seat":
+            ride.price_per_seat,
+
+        "status":
+            ride.status,
+
+        "driver":
+            serialize_driver(
+                ride.driver
+            ),
     }
 
 
-# ---------------------------------------------------------
+def serialize_request(
+    request,
+):
+
+    return {
+        "request_id":
+            request.id,
+
+        "status":
+            request.status,
+
+        "pickup_address":
+            request.pickup_address,
+
+        "pickup_lat":
+            request.pickup_lat,
+
+        "pickup_lon":
+            request.pickup_lon,
+
+        "passenger_distance_km":
+            request.passenger_distance_km,
+
+        "detour_km":
+            request.detour_km,
+
+        "quoted_price":
+            request.quoted_price,
+
+        "route_with_pickup_geometry":
+            request
+            .route_with_pickup_geometry,
+
+        "passenger_route_geometry":
+            request
+            .passenger_route_geometry,
+
+        "passenger": {
+            "id":
+                request.passenger.id,
+
+            "name":
+                request.passenger.name,
+
+            "email":
+                request.passenger.email,
+        },
+
+        "ride":
+            serialize_ride(
+                request.ride
+            ),
+    }
+
+
+# -------------------------------------------
 # ROOT
-# ---------------------------------------------------------
+# -------------------------------------------
 
 @app.get("/")
 def root():
+
     return {
-        "message": "Western Rideshare API",
-        "status": "running",
+        "message":
+            "Western Rideshare API",
+
+        "status":
+            "running",
     }
 
 
-# ---------------------------------------------------------
+# -------------------------------------------
 # USERS
-# ---------------------------------------------------------
+# -------------------------------------------
 
 @app.post("/users")
 def create_user(
     user: UserCreate,
-    db: Session = Depends(get_db),
+
+    db: Session
+        = Depends(get_db),
 ):
-    email = user.email.lower().strip()
+
+    email = (
+        user.email
+        .lower()
+        .strip()
+    )
+
+    if not email.endswith(
+        "@uwo.ca"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please use a Western "
+                "University email address"
+            ),
+        )
 
     existing_user = (
-        db.query(models.User)
-        .filter(models.User.email == email)
+        db.query(
+            models.User
+        )
+        .filter(
+            models.User.email
+            == email
+        )
         .first()
     )
 
     if existing_user:
         raise HTTPException(
             status_code=400,
-            detail="Email already registered",
+            detail=(
+                "Email already registered"
+            ),
         )
 
-    hashed_password = pwd_context.hash(user.password)
-
-    new_user = models.User(
-        name=user.name.strip(),
-        email=email,
-        hashed_password=hashed_password,
+    hashed_password = (
+        pwd_context.hash(
+            user.password
+        )
     )
 
-    db.add(new_user)
+    new_user = models.User(
+        name=
+            user.name.strip(),
+
+        email=
+            email,
+
+        hashed_password=
+            hashed_password,
+    )
+
+    db.add(
+        new_user
+    )
+
     db.commit()
-    db.refresh(new_user)
+
+    db.refresh(
+        new_user
+    )
 
     return {
-        "message": "User created successfully",
+        "message":
+            "User created successfully",
+
         "user": {
-            "id": new_user.id,
-            "name": new_user.name,
-            "email": new_user.email,
+            "id":
+                new_user.id,
+
+            "name":
+                new_user.name,
+
+            "email":
+                new_user.email,
         },
     }
 
@@ -209,110 +675,394 @@ def create_user(
 @app.post("/login")
 def login(
     user: UserLogin,
-    db: Session = Depends(get_db),
+
+    db: Session
+        = Depends(get_db),
 ):
-    email = user.email.lower().strip()
+
+    email = (
+        user.email
+        .lower()
+        .strip()
+    )
 
     db_user = (
-        db.query(models.User)
-        .filter(models.User.email == email)
+        db.query(
+            models.User
+        )
+        .filter(
+            models.User.email
+            == email
+        )
         .first()
     )
 
     if not db_user:
+
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password",
+            detail=(
+                "Invalid email or password"
+            ),
         )
 
-    password_is_correct = pwd_context.verify(
+    if not pwd_context.verify(
         user.password,
         db_user.hashed_password,
-    )
+    ):
 
-    if not password_is_correct:
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password",
+            detail=(
+                "Invalid email or password"
+            ),
         )
 
-    access_token = create_access_token(db_user.id)
+    access_token = (
+        create_access_token(
+            db_user.id
+        )
+    )
 
     return {
-        "message": "Login successful",
-        "access_token": access_token,
-        "token_type": "bearer",
+        "message":
+            "Login successful",
+
+        "access_token":
+            access_token,
+
+        "token_type":
+            "bearer",
+
         "user": {
-            "id": db_user.id,
-            "name": db_user.name,
-            "email": db_user.email,
+            "id":
+                db_user.id,
+
+            "name":
+                db_user.name,
+
+            "email":
+                db_user.email,
         },
     }
 
 
 @app.get("/me")
 def get_me(
-    current_user: models.User = Depends(get_current_user),
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
 ):
+
     return {
-        "id": current_user.id,
-        "name": current_user.name,
-        "email": current_user.email,
+        "id":
+            current_user.id,
+
+        "name":
+            current_user.name,
+
+        "email":
+            current_user.email,
+
+        "western_verified":
+            current_user
+            .email
+            .endswith(
+                "@uwo.ca"
+            ),
     }
 
 
-# ---------------------------------------------------------
-# CREATE RIDE
-# ---------------------------------------------------------
+@app.patch("/me")
+def update_profile(
+    profile:
+        UserProfileUpdate,
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
+):
+
+    current_user.name = (
+        profile.name.strip()
+    )
+
+    db.commit()
+
+    db.refresh(
+        current_user
+    )
+
+    return {
+        "message":
+            "Profile updated successfully",
+
+        "user": {
+            "id":
+                current_user.id,
+
+            "name":
+                current_user.name,
+
+            "email":
+                current_user.email,
+
+            "western_verified":
+                current_user
+                .email
+                .endswith(
+                    "@uwo.ca"
+                ),
+        },
+    }
+
+
+# -------------------------------------------
+# ROUTE PREVIEW
+# -------------------------------------------
+
+@app.post(
+    "/route-preview"
+)
+def route_preview(
+    request:
+        RoutePreviewRequest,
+):
+
+    origin = (
+        geocode_address(
+            request.origin
+        )
+    )
+
+    destination = (
+        geocode_address(
+            request.destination
+        )
+    )
+
+    route = (
+        calculate_route(
+            [
+                origin,
+                destination,
+            ]
+        )
+    )
+
+    price = (
+        calculate_ride_price(
+            route[
+                "distance_km"
+            ]
+        )
+    )
+
+    return {
+        "origin":
+            origin,
+
+        "destination":
+            destination,
+
+        "distance_km":
+            route[
+                "distance_km"
+            ],
+
+        "duration_minutes":
+            route[
+                "duration_minutes"
+            ],
+
+        "route_geometry":
+            route[
+                "route_geometry"
+            ],
+
+        "price_per_seat":
+            price,
+    }
+
+
+# -------------------------------------------
+# RIDES
+# -------------------------------------------
 
 @app.post("/rides")
 def create_ride(
-    ride: RideCreate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    ride:
+        RideCreate,
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
-    if ride.departure_time <= datetime.now():
+
+    if (
+        ride.departure_time
+        <= datetime.now()
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="Departure time must be in the future",
+            detail=(
+                "Departure time must "
+                "be in the future"
+            ),
         )
 
-    new_ride = models.Ride(
-        driver_id=current_user.id,
-        origin=ride.origin.strip(),
-        destination=ride.destination.strip(),
-        departure_time=ride.departure_time,
-        available_seats=ride.available_seats,
-        price_per_seat=ride.price_per_seat,
-        status="active",
+    origin = (
+        geocode_address(
+            ride.origin
+        )
     )
 
-    db.add(new_ride)
+    destination = (
+        geocode_address(
+            ride.destination
+        )
+    )
+
+    route = (
+        calculate_route(
+            [
+                origin,
+                destination,
+            ]
+        )
+    )
+
+    price = (
+        calculate_ride_price(
+            route[
+                "distance_km"
+            ]
+        )
+    )
+
+    new_ride = models.Ride(
+        driver_id=
+            current_user.id,
+
+        origin=
+            origin[
+                "display_name"
+            ],
+
+        destination=
+            destination[
+                "display_name"
+            ],
+
+        origin_lat=
+            origin["lat"],
+
+        origin_lon=
+            origin["lon"],
+
+        destination_lat=
+            destination["lat"],
+
+        destination_lon=
+            destination["lon"],
+
+        route_geometry=
+            route[
+                "route_geometry"
+            ],
+
+        departure_time=
+            ride.departure_time,
+
+        distance_km=
+            route[
+                "distance_km"
+            ],
+
+        duration_minutes=
+            route[
+                "duration_minutes"
+            ],
+
+        available_seats=
+            ride.available_seats,
+
+        price_per_seat=
+            price,
+
+        status=
+            "active",
+    )
+
+    db.add(
+        new_ride
+    )
+
     db.commit()
-    db.refresh(new_ride)
+
+    db.refresh(
+        new_ride
+    )
 
     return {
-        "message": "Ride created successfully",
-        "ride": serialize_ride(new_ride),
+        "message":
+            "Ride created successfully",
+
+        "ride":
+            serialize_ride(
+                new_ride
+            ),
     }
 
 
-# ---------------------------------------------------------
-# GET / SEARCH RIDES
-# ---------------------------------------------------------
-
 @app.get("/rides")
 def get_rides(
-    origin: str | None = Query(default=None),
-    destination: str | None = Query(default=None),
-    ride_date: date | None = Query(default=None),
-    db: Session = Depends(get_db),
-):
-    query = db.query(models.Ride)
+    origin:
+        str | None
+        = Query(
+            default=None
+        ),
 
-    query = query.filter(
-        models.Ride.status == "active",
-        models.Ride.available_seats > 0,
+    destination:
+        str | None
+        = Query(
+            default=None
+        ),
+
+    ride_date:
+        date | None
+        = Query(
+            default=None
+        ),
+
+    db: Session
+        = Depends(get_db),
+):
+
+    query = (
+        db.query(
+            models.Ride
+        )
+        .filter(
+            models.Ride.status
+            == "active",
+
+            models.Ride.available_seats
+            > 0,
+        )
     )
 
     if origin:
@@ -330,516 +1080,787 @@ def get_rides(
         )
 
     if ride_date:
-        start_datetime = datetime.combine(
-            ride_date,
-            time.min,
+
+        start_datetime = (
+            datetime.combine(
+                ride_date,
+                time.min,
+            )
         )
 
-        end_datetime = datetime.combine(
-            ride_date,
-            time.max,
+        end_datetime = (
+            datetime.combine(
+                ride_date,
+                time.max,
+            )
         )
 
         query = query.filter(
-            models.Ride.departure_time >= start_datetime,
-            models.Ride.departure_time <= end_datetime,
+            models.Ride.departure_time
+            >= start_datetime,
+
+            models.Ride.departure_time
+            <= end_datetime,
         )
 
     rides = (
         query
-        .order_by(models.Ride.departure_time.asc())
+        .order_by(
+            models.Ride
+            .departure_time
+            .asc()
+        )
         .all()
     )
 
-    return [serialize_ride(ride) for ride in rides]
+    return [
+        serialize_ride(
+            ride
+        )
+        for ride in rides
+    ]
 
 
-# ---------------------------------------------------------
-# GET ONE RIDE
-# ---------------------------------------------------------
-
-@app.get("/rides/{ride_id}")
+@app.get(
+    "/rides/{ride_id}"
+)
 def get_ride(
     ride_id: int,
-    db: Session = Depends(get_db),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     ride = (
-        db.query(models.Ride)
-        .filter(models.Ride.id == ride_id)
+        db.query(
+            models.Ride
+        )
+        .filter(
+            models.Ride.id
+            == ride_id
+        )
         .first()
     )
 
     if not ride:
+
         raise HTTPException(
             status_code=404,
             detail="Ride not found",
         )
 
-    return serialize_ride(ride)
+    return serialize_ride(
+        ride
+    )
 
-
-# ---------------------------------------------------------
-# DRIVER'S RIDES
-# ---------------------------------------------------------
 
 @app.get("/my-rides")
 def get_my_rides(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     rides = (
-        db.query(models.Ride)
-        .filter(
-            models.Ride.driver_id == current_user.id
+        db.query(
+            models.Ride
         )
-        .order_by(models.Ride.departure_time.asc())
+        .filter(
+            models.Ride.driver_id
+            == current_user.id
+        )
+        .order_by(
+            models.Ride
+            .departure_time
+            .asc()
+        )
         .all()
     )
 
-    return [serialize_ride(ride) for ride in rides]
-
-
-# ---------------------------------------------------------
-# UPDATE RIDE
-# ---------------------------------------------------------
-
-@app.patch("/rides/{ride_id}")
-def update_ride(
-    ride_id: int,
-    ride_update: RideUpdate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    ride = (
-        db.query(models.Ride)
-        .filter(models.Ride.id == ride_id)
-        .first()
-    )
-
-    if not ride:
-        raise HTTPException(
-            status_code=404,
-            detail="Ride not found",
+    return [
+        serialize_ride(
+            ride
         )
-
-    if ride.driver_id != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not the driver of this ride",
-        )
-
-    if ride.status != "active":
-        raise HTTPException(
-            status_code=400,
-            detail="Only active rides can be edited",
-        )
-
-    update_data = ride_update.model_dump(
-        exclude_unset=True
-    )
-
-    if "origin" in update_data:
-        update_data["origin"] = (
-            update_data["origin"].strip()
-        )
-
-    if "destination" in update_data:
-        update_data["destination"] = (
-            update_data["destination"].strip()
-        )
-
-    if "departure_time" in update_data:
-        if update_data["departure_time"] <= datetime.now():
-            raise HTTPException(
-                status_code=400,
-                detail="Departure time must be in the future",
-            )
-
-    for field, value in update_data.items():
-        setattr(ride, field, value)
-
-    db.commit()
-    db.refresh(ride)
-
-    return {
-        "message": "Ride updated successfully",
-        "ride": serialize_ride(ride),
-    }
+        for ride in rides
+    ]
 
 
-# ---------------------------------------------------------
-# CANCEL RIDE
-# ---------------------------------------------------------
-
-@app.delete("/rides/{ride_id}")
+@app.delete(
+    "/rides/{ride_id}"
+)
 def cancel_ride(
     ride_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     ride = (
-        db.query(models.Ride)
-        .filter(models.Ride.id == ride_id)
+        db.query(
+            models.Ride
+        )
+        .filter(
+            models.Ride.id
+            == ride_id
+        )
         .first()
     )
 
     if not ride:
+
         raise HTTPException(
             status_code=404,
             detail="Ride not found",
         )
 
-    if ride.driver_id != current_user.id:
+    if (
+        ride.driver_id
+        != current_user.id
+    ):
+
         raise HTTPException(
             status_code=403,
-            detail="You are not the driver of this ride",
+            detail=(
+                "You are not the driver "
+                "of this ride"
+            ),
         )
 
-    if ride.status == "cancelled":
-        raise HTTPException(
-            status_code=400,
-            detail="Ride is already cancelled",
-        )
+    ride.status = (
+        "cancelled"
+    )
 
-    ride.status = "cancelled"
+    for request in ride.requests:
 
-    for ride_request in ride.requests:
-        if ride_request.status == "pending":
-            ride_request.status = "cancelled"
-
-        elif ride_request.status == "accepted":
-            ride_request.status = "cancelled"
+        if (
+            request.status
+            in {
+                "pending",
+                "accepted",
+            }
+        ):
+            request.status = (
+                "cancelled"
+            )
 
     db.commit()
 
     return {
-        "message": "Ride cancelled successfully",
-        "ride_id": ride.id,
-        "status": ride.status,
+        "message":
+            "Ride cancelled successfully",
     }
 
 
-# ---------------------------------------------------------
-# REQUEST A RIDE
-# ---------------------------------------------------------
+# -------------------------------------------
+# PASSENGER REQUEST
+# -------------------------------------------
 
-@app.post("/rides/{ride_id}/request")
+@app.post(
+    "/rides/{ride_id}/request"
+)
 def request_ride(
     ride_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+
+    request:
+        RideRequestCreate,
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     ride = (
-        db.query(models.Ride)
-        .filter(models.Ride.id == ride_id)
+        db.query(
+            models.Ride
+        )
+        .filter(
+            models.Ride.id
+            == ride_id
+        )
         .first()
     )
 
     if not ride:
+
         raise HTTPException(
             status_code=404,
             detail="Ride not found",
         )
 
     if ride.status != "active":
+
         raise HTTPException(
             status_code=400,
-            detail="This ride is not active",
+            detail=(
+                "This ride is not active"
+            ),
         )
 
-    if ride.driver_id == current_user.id:
+    if (
+        ride.driver_id
+        == current_user.id
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="You cannot request your own ride",
+            detail=(
+                "You cannot request "
+                "your own ride"
+            ),
         )
 
-    if ride.available_seats <= 0:
+    if (
+        ride.available_seats
+        <= 0
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="This ride has no available seats",
+            detail=(
+                "No seats are available"
+            ),
         )
 
     existing_request = (
-        db.query(models.RideRequest)
+        db.query(
+            models.RideRequest
+        )
         .filter(
-            models.RideRequest.ride_id == ride_id,
-            models.RideRequest.passenger_id
+            models.RideRequest
+            .ride_id
+            == ride.id,
+
+            models.RideRequest
+            .passenger_id
             == current_user.id,
         )
         .first()
     )
 
     if existing_request:
+
         raise HTTPException(
             status_code=400,
-            detail="You have already requested this ride",
+            detail=(
+                "You have already "
+                "requested this ride"
+            ),
         )
 
-    new_request = models.RideRequest(
-        ride_id=ride.id,
-        passenger_id=current_user.id,
-        status="pending",
+    pickup = (
+        geocode_address(
+            request.pickup_address
+        )
     )
 
-    db.add(new_request)
+    origin = {
+        "lat":
+            ride.origin_lat,
+
+        "lon":
+            ride.origin_lon,
+    }
+
+    destination = {
+        "lat":
+            ride.destination_lat,
+
+        "lon":
+            ride.destination_lon,
+    }
+
+    route_with_pickup = (
+        calculate_route(
+            [
+                origin,
+                pickup,
+                destination,
+            ]
+        )
+    )
+
+    passenger_route = (
+        calculate_route(
+            [
+                pickup,
+                destination,
+            ]
+        )
+    )
+
+    detour_km = round(
+        max(
+            0,
+            route_with_pickup[
+                "distance_km"
+            ]
+            - ride.distance_km,
+        ),
+        1,
+    )
+
+    if detour_km > 15:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pickup location adds "
+                "more than 15 km to "
+                "the driver's route"
+            ),
+        )
+
+    passenger_price = (
+        calculate_ride_price(
+            passenger_route[
+                "distance_km"
+            ]
+        )
+    )
+
+    new_request = (
+        models.RideRequest(
+            ride_id=
+                ride.id,
+
+            passenger_id=
+                current_user.id,
+
+            pickup_address=
+                pickup[
+                    "display_name"
+                ],
+
+            pickup_lat=
+                pickup["lat"],
+
+            pickup_lon=
+                pickup["lon"],
+
+            passenger_distance_km=
+                passenger_route[
+                    "distance_km"
+                ],
+
+            detour_km=
+                detour_km,
+
+            quoted_price=
+                passenger_price,
+
+            route_with_pickup_geometry=
+                route_with_pickup[
+                    "route_geometry"
+                ],
+
+            passenger_route_geometry=
+                passenger_route[
+                    "route_geometry"
+                ],
+
+            status=
+                "pending",
+        )
+    )
+
+    db.add(
+        new_request
+    )
+
     db.commit()
-    db.refresh(new_request)
+
+    db.refresh(
+        new_request
+    )
 
     return {
-        "message": "Ride request sent",
-        "request": {
-            "id": new_request.id,
-            "ride_id": new_request.ride_id,
-            "passenger_id": new_request.passenger_id,
-            "status": new_request.status,
-        },
+        "message":
+            "Ride request sent",
+
+        "request":
+            serialize_request(
+                new_request
+            ),
     }
 
 
-# ---------------------------------------------------------
-# PASSENGER REQUEST HISTORY
-# ---------------------------------------------------------
-
 @app.get("/my-requests")
 def get_my_requests(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     requests = (
-        db.query(models.RideRequest)
+        db.query(
+            models.RideRequest
+        )
         .filter(
-            models.RideRequest.passenger_id
+            models.RideRequest
+            .passenger_id
             == current_user.id
         )
-        .order_by(models.RideRequest.id.desc())
+        .order_by(
+            models.RideRequest
+            .id
+            .desc()
+        )
         .all()
     )
 
-    results = []
-
-    for ride_request in requests:
-        results.append(
-            {
-                "request_id": ride_request.id,
-                "status": ride_request.status,
-                "ride": serialize_ride(
-                    ride_request.ride
-                ),
-            }
+    return [
+        serialize_request(
+            request
         )
+        for request
+        in requests
+    ]
 
-    return results
 
-
-# ---------------------------------------------------------
-# CANCEL PASSENGER REQUEST
-# ---------------------------------------------------------
-
-@app.delete("/requests/{request_id}")
+@app.delete(
+    "/requests/{request_id}"
+)
 def cancel_request(
     request_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
-    ride_request = (
-        db.query(models.RideRequest)
+
+    request = (
+        db.query(
+            models.RideRequest
+        )
         .filter(
-            models.RideRequest.id == request_id
+            models.RideRequest.id
+            == request_id
         )
         .first()
     )
 
-    if not ride_request:
+    if not request:
+
         raise HTTPException(
             status_code=404,
-            detail="Ride request not found",
+            detail=(
+                "Ride request not found"
+            ),
         )
 
     if (
-        ride_request.passenger_id
+        request.passenger_id
         != current_user.id
     ):
+
         raise HTTPException(
             status_code=403,
-            detail="This is not your ride request",
+            detail=(
+                "This is not your "
+                "ride request"
+            ),
         )
 
-    if ride_request.status == "cancelled":
-        raise HTTPException(
-            status_code=400,
-            detail="Request is already cancelled",
-        )
+    if (
+        request.status
+        == "accepted"
+    ):
 
-    if ride_request.status == "declined":
-        raise HTTPException(
-            status_code=400,
-            detail="A declined request cannot be cancelled",
-        )
+        request.ride.available_seats += 1
 
-    if ride_request.status == "accepted":
-        ride_request.ride.available_seats += 1
-
-    ride_request.status = "cancelled"
+    request.status = (
+        "cancelled"
+    )
 
     db.commit()
-    db.refresh(ride_request)
 
     return {
-        "message": "Ride request cancelled",
-        "request_id": ride_request.id,
-        "status": ride_request.status,
+        "message":
+            "Ride request cancelled",
     }
 
 
-# ---------------------------------------------------------
+# -------------------------------------------
 # DRIVER REQUESTS
-# ---------------------------------------------------------
+# -------------------------------------------
 
-@app.get("/driver/requests")
+@app.get(
+    "/driver/requests"
+)
 def get_driver_requests(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
+
     requests = (
-        db.query(models.RideRequest)
-        .join(models.Ride)
+        db.query(
+            models.RideRequest
+        )
+        .join(
+            models.Ride
+        )
         .filter(
             models.Ride.driver_id
             == current_user.id
         )
-        .order_by(models.RideRequest.id.desc())
+        .order_by(
+            models.RideRequest
+            .id
+            .desc()
+        )
         .all()
     )
 
-    results = []
-
-    for ride_request in requests:
-        results.append(
-            {
-                "request_id": ride_request.id,
-                "status": ride_request.status,
-                "passenger": serialize_passenger(
-                    ride_request.passenger
-                ),
-                "ride": serialize_ride(
-                    ride_request.ride
-                ),
-            }
+    return [
+        serialize_request(
+            request
         )
+        for request
+        in requests
+    ]
 
-    return results
 
-
-# ---------------------------------------------------------
-# ACCEPT REQUEST
-# ---------------------------------------------------------
-
-@app.post("/requests/{request_id}/accept")
-def accept_ride_request(
+@app.post(
+    "/requests/{request_id}/accept"
+)
+def accept_request(
     request_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
-    ride_request = (
-        db.query(models.RideRequest)
+
+    request = (
+        db.query(
+            models.RideRequest
+        )
         .filter(
-            models.RideRequest.id == request_id
+            models.RideRequest.id
+            == request_id
         )
         .first()
     )
 
-    if not ride_request:
+    if not request:
+
         raise HTTPException(
             status_code=404,
-            detail="Ride request not found",
+            detail=(
+                "Ride request not found"
+            ),
         )
 
-    ride = ride_request.ride
+    ride = request.ride
 
-    if ride.driver_id != current_user.id:
+    if (
+        ride.driver_id
+        != current_user.id
+    ):
+
         raise HTTPException(
             status_code=403,
-            detail="You are not the driver of this ride",
+            detail=(
+                "You are not the driver"
+            ),
         )
 
-    if ride.status != "active":
+    if (
+        request.status
+        != "pending"
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="This ride is not active",
+            detail=(
+                "Request has already "
+                "been processed"
+            ),
         )
 
-    if ride_request.status != "pending":
+    if (
+        ride.available_seats
+        <= 0
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="This request has already been processed",
+            detail=(
+                "No available seats"
+            ),
         )
 
-    if ride.available_seats <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No available seats remain",
-        )
+    request.status = (
+        "accepted"
+    )
 
-    ride_request.status = "accepted"
     ride.available_seats -= 1
 
     db.commit()
-    db.refresh(ride_request)
-    db.refresh(ride)
 
     return {
-        "message": "Ride request accepted",
-        "request_id": ride_request.id,
-        "status": ride_request.status,
-        "remaining_seats": ride.available_seats,
+        "message":
+            "Ride request accepted",
     }
 
 
-# ---------------------------------------------------------
-# DECLINE REQUEST
-# ---------------------------------------------------------
-
-@app.post("/requests/{request_id}/decline")
-def decline_ride_request(
+@app.post(
+    "/requests/{request_id}/decline"
+)
+def decline_request(
     request_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
 ):
-    ride_request = (
-        db.query(models.RideRequest)
+
+    request = (
+        db.query(
+            models.RideRequest
+        )
         .filter(
-            models.RideRequest.id == request_id
+            models.RideRequest.id
+            == request_id
         )
         .first()
     )
 
-    if not ride_request:
+    if not request:
+
         raise HTTPException(
             status_code=404,
-            detail="Ride request not found",
+            detail=(
+                "Ride request not found"
+            ),
         )
 
-    ride = ride_request.ride
+    if (
+        request.ride.driver_id
+        != current_user.id
+    ):
 
-    if ride.driver_id != current_user.id:
         raise HTTPException(
             status_code=403,
-            detail="You are not the driver of this ride",
+            detail=(
+                "You are not the driver"
+            ),
         )
 
-    if ride_request.status != "pending":
+    if (
+        request.status
+        != "pending"
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="This request has already been processed",
+            detail=(
+                "Request has already "
+                "been processed"
+            ),
         )
 
-    ride_request.status = "declined"
+    request.status = (
+        "declined"
+    )
 
     db.commit()
-    db.refresh(ride_request)
 
     return {
-        "message": "Ride request declined",
-        "request_id": ride_request.id,
-        "status": ride_request.status,
+        "message":
+            "Ride request declined",
+    }
+
+
+# -------------------------------------------
+# IMPACT
+# -------------------------------------------
+
+@app.get("/impact")
+def get_impact(
+    current_user:
+        models.User
+        = Depends(
+            get_current_user
+        ),
+
+    db: Session
+        = Depends(get_db),
+):
+
+    accepted_requests = (
+        db.query(
+            models.RideRequest
+        )
+        .filter(
+            models.RideRequest
+            .status
+            == "accepted"
+        )
+        .all()
+    )
+
+    shared_ride_ids = {
+        request.ride_id
+        for request
+        in accepted_requests
+    }
+
+    return {
+        "shared_rides":
+            len(
+                shared_ride_ids
+            ),
+
+        "accepted_passengers":
+            len(
+                accepted_requests
+            ),
+
+        "estimated_vehicles_avoided":
+            len(
+                accepted_requests
+            ),
     }
