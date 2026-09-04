@@ -2,6 +2,7 @@
 
 import {
   FormEvent,
+  useCallback,
   useEffect,
   useState,
 } from "react";
@@ -14,10 +15,30 @@ import {
   apiRequest,
 } from "@/lib/api";
 
+
+type Vehicle = {
+  year:
+    number | null;
+
+  make:
+    string | null;
+
+  model:
+    string | null;
+
+  color:
+    string | null;
+
+  license_plate:
+    string | null;
+};
+
+
 type Ride = {
   id: number;
 
   origin: string;
+
   destination: string;
 
   origin_lat:
@@ -35,182 +56,349 @@ type Ride = {
   route_geometry:
     number[][] | null;
 
-  departure_time: string;
+  departure_time:
+    string;
 
-  distance_km: number;
+  distance_km:
+    number;
 
   duration_minutes:
     number | null;
 
-  available_seats: number;
+  available_seats:
+    number;
 
-  price_per_seat: number;
+  total_seats:
+    number;
 
-  status: string;
+  price_per_seat:
+    number;
+
+  status:
+    string;
 
   driver: {
-    id: number;
-    name: string;
+    id:
+      number;
+
+    name:
+      string;
+
+    rating_average:
+      number | null;
+
+    rating_count:
+      number;
+
+    vehicle:
+      Vehicle | null;
   };
 };
+
+
+function prettyDate(
+  value: string
+) {
+  return (
+    new Date(
+      value
+    )
+      .toLocaleString(
+        [],
+        {
+          month:
+            "short",
+
+          day:
+            "numeric",
+
+          year:
+            "numeric",
+
+          hour:
+            "numeric",
+
+          minute:
+            "2-digit",
+        }
+      )
+  );
+}
+
 
 export default function RidesPage() {
   const [
     rides,
     setRides,
   ] =
-    useState<Ride[]>([]);
+    useState<Ride[]>(
+      []
+    );
+
 
   const [
     origin,
     setOrigin,
-  ] = useState("");
+  ] =
+    useState("");
+
 
   const [
     destination,
     setDestination,
-  ] = useState("");
+  ] =
+    useState("");
+
 
   const [
     rideDate,
     setRideDate,
-  ] = useState("");
+  ] =
+    useState("");
+
 
   const [
     pickupAddresses,
     setPickupAddresses,
   ] =
     useState<
-      Record<number, string>
+      Record<
+        number,
+        string
+      >
     >({});
+
 
   const [
     expandedRide,
     setExpandedRide,
   ] =
-    useState<number | null>(
-      null
-    );
+    useState<
+      number | null
+    >(null);
+
 
   const [
     loading,
     setLoading,
-  ] = useState(true);
+  ] =
+    useState(true);
+
 
   const [
     requestingRide,
     setRequestingRide,
   ] =
-    useState<number | null>(
-      null
-    );
+    useState<
+      number | null
+    >(null);
+
 
   const [
     message,
     setMessage,
-  ] = useState("");
+  ] =
+    useState("");
+
 
   const [
     error,
     setError,
-  ] = useState("");
+  ] =
+    useState("");
 
-  async function loadRides(
-    searchOrigin = origin,
-    searchDestination =
-      destination,
-    searchDate = rideDate
-  ) {
-    setLoading(true);
-    setError("");
 
-    try {
-      const params =
-        new URLSearchParams();
+  const loadRides =
+    useCallback(
+      async (
+        showLoader = false
+      ) => {
 
-      if (
-        searchOrigin.trim()
-      ) {
-        params.set(
-          "origin",
-          searchOrigin.trim()
-        );
-      }
+        if (
+          showLoader
+        ) {
+          setLoading(
+            true
+          );
+        }
 
-      if (
-        searchDestination.trim()
-      ) {
-        params.set(
-          "destination",
-          searchDestination.trim()
-        );
-      }
 
-      if (searchDate) {
-        params.set(
-          "ride_date",
-          searchDate
-        );
-      }
+        try {
 
-      const query =
-        params.toString();
+          const params =
+            new URLSearchParams();
 
-      const data =
-        await apiRequest(
-          query
-            ? `/rides?${query}`
-            : "/rides"
-        );
 
-      setRides(data);
-    } catch (error) {
-      if (
-        error instanceof Error
-      ) {
-        setError(
-          error.message
-        );
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
+          if (
+            origin.trim()
+          ) {
+            params.set(
+              "origin",
+              origin.trim()
+            );
+          }
 
-  useEffect(() => {
-    loadRides(
-      "",
-      "",
-      ""
+
+          if (
+            destination.trim()
+          ) {
+            params.set(
+              "destination",
+              destination.trim()
+            );
+          }
+
+
+          if (
+            rideDate
+          ) {
+            params.set(
+              "ride_date",
+              rideDate
+            );
+          }
+
+
+          const query =
+            params.toString();
+
+
+          const data =
+            await apiRequest(
+              query
+                ? `/rides?${query}`
+                : "/rides"
+            );
+
+
+          setRides(
+            data
+          );
+
+        } catch (
+          error
+        ) {
+
+          if (
+            error instanceof Error
+          ) {
+            setError(
+              error.message
+            );
+          }
+
+        } finally {
+
+          if (
+            showLoader
+          ) {
+            setLoading(
+              false
+            );
+          }
+        }
+      },
+      [
+        origin,
+        destination,
+        rideDate,
+      ]
     );
-  }, []);
+
+
+  useEffect(
+    () => {
+
+      loadRides(
+        true
+      );
+
+    },
+    [
+      loadRides,
+    ]
+  );
+
+
+  useEffect(
+    () => {
+
+      const interval =
+        window.setInterval(
+          () => {
+
+            loadRides(
+              false
+            );
+
+          },
+          10000
+        );
+
+
+      return () => {
+
+        window.clearInterval(
+          interval
+        );
+
+      };
+
+    },
+    [
+      loadRides,
+    ]
+  );
+
 
   async function handleSearch(
     event:
       FormEvent<HTMLFormElement>
   ) {
+
     event.preventDefault();
 
-    setMessage("");
 
-    await loadRides();
+    setMessage(
+      ""
+    );
+
+
+    setError(
+      ""
+    );
+
+
+    await loadRides(
+      true
+    );
   }
+
 
   async function requestRide(
     rideId: number
   ) {
+
     const pickup =
       pickupAddresses[
         rideId
-      ];
+      ]?.trim();
 
-    setError("");
-    setMessage("");
+
+    setMessage(
+      ""
+    );
+
+
+    setError(
+      ""
+    );
+
 
     if (
-      !pickup ||
-      !pickup.trim()
+      !pickup
     ) {
+
       setError(
         "Choose your pickup address before requesting the ride."
       );
@@ -218,41 +406,54 @@ export default function RidesPage() {
       return;
     }
 
+
     setRequestingRide(
       rideId
     );
 
+
     try {
-      const data =
-        await apiRequest(
-          `/rides/${rideId}/request`,
-          {
-            method: "POST",
 
-            body:
-              JSON.stringify({
-                pickup_address:
-                  pickup,
-              }),
-          }
-        );
+      await apiRequest(
+        `/rides/${rideId}/request`,
+        {
+          method:
+            "POST",
 
-      const price =
-        data.request
-          .quoted_price;
-
-      const detour =
-        data.request
-          .detour_km;
-
-      setMessage(
-        `Ride requested successfully. Estimated fare: $${price.toFixed(
-          2
-        )}. Driver detour: ${detour} km.`
+          body:
+            JSON.stringify({
+              pickup_address:
+                pickup,
+            }),
+        }
       );
 
-      await loadRides();
-    } catch (error) {
+
+      setMessage(
+        "Ride request sent to the driver."
+      );
+
+
+      setPickupAddresses(
+        (
+          previous
+        ) => ({
+          ...previous,
+
+          [rideId]:
+            "",
+        })
+      );
+
+
+      await loadRides(
+        false
+      );
+
+    } catch (
+      error
+    ) {
+
       if (
         error instanceof Error
       ) {
@@ -260,392 +461,561 @@ export default function RidesPage() {
           error.message
         );
       }
+
     } finally {
+
       setRequestingRide(
         null
       );
     }
   }
 
+
   return (
-    <main className="min-h-screen bg-slate-50">
+    <main className="min-h-screen bg-gray-50">
+
       <Navbar />
 
-      <section className="mx-auto max-w-6xl px-5 py-10 sm:px-6 sm:py-12">
 
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-[#4f2683]">
-            Passenger
-          </p>
+      <section className="mx-auto max-w-7xl px-6 py-12">
 
-          <h1 className="mt-2 text-4xl font-bold tracking-tight sm:text-5xl">
-            Find your next ride.
-          </h1>
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
 
-          <p className="mt-3 max-w-2xl text-lg text-gray-600">
-            Browse student rides,
-            view the driver's route
-            and choose your pickup
-            location.
-          </p>
+          <div>
+
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-[#4f2683]">
+              Passenger
+            </p>
+
+
+            <h1 className="mt-2 text-4xl font-bold">
+              Find a Ride
+            </h1>
+
+
+            <p className="mt-2 text-gray-600">
+              Western Rideshare only accepts locations within 30 km of Western University.
+            </p>
+
+          </div>
+
+
+          <div className="rounded-2xl border border-purple-100 bg-[#f7f2fb] px-5 py-3 text-sm text-[#4f2683]">
+            Available seats refresh every 10 seconds.
+          </div>
+
         </div>
+
 
         <form
           onSubmit={
             handleSearch
           }
-          className="mt-8 grid gap-4 rounded-[2rem] border border-gray-200 bg-white p-6 shadow-sm md:grid-cols-4"
+
+          className="mt-8 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm"
         >
 
-          <input
-            type="text"
-            value={origin}
-            onChange={(
-              event
-            ) =>
-              setOrigin(
-                event.target.value
-              )
-            }
-            placeholder="Search origin"
-            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:border-[#4f2683] focus:ring-2 focus:ring-purple-100"
-          />
+          <div className="grid gap-5 lg:grid-cols-[1fr_1fr_200px_auto] lg:items-end">
 
-          <input
-            type="text"
-            value={
-              destination
-            }
-            onChange={(
-              event
-            ) =>
-              setDestination(
-                event.target.value
-              )
-            }
-            placeholder="Search destination"
-            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:border-[#4f2683] focus:ring-2 focus:ring-purple-100"
-          />
+            <AddressAutocomplete
+              label="Starting area"
 
-          <input
-            type="date"
-            value={rideDate}
-            onChange={(
-              event
-            ) =>
-              setRideDate(
-                event.target.value
-              )
-            }
-            className="rounded-xl border border-gray-300 px-4 py-3 outline-none focus:border-[#4f2683]"
-          />
+              value={
+                origin
+              }
 
-          <button
-            type="submit"
-            className="rounded-xl bg-[#4f2683] px-5 py-3 font-semibold text-white transition hover:bg-[#35165c]"
-          >
-            Search Rides
-          </button>
+              onChange={
+                setOrigin
+              }
+
+              placeholder="e.g. Masonville"
+            />
+
+
+            <AddressAutocomplete
+              label="Destination"
+
+              value={
+                destination
+              }
+
+              onChange={
+                setDestination
+              }
+
+              placeholder="e.g. Western University"
+            />
+
+
+            <div>
+
+              <label className="block text-sm font-semibold text-gray-900">
+                Date
+              </label>
+
+
+              <input
+                type="date"
+
+                value={
+                  rideDate
+                }
+
+                onChange={(
+                  event
+                ) =>
+                  setRideDate(
+                    event
+                      .target
+                      .value
+                  )
+                }
+
+                className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 outline-none focus:border-[#4f2683]"
+              />
+
+            </div>
+
+
+            <button
+              type="submit"
+
+              className="rounded-xl bg-[#4f2683] px-6 py-3 font-semibold text-white hover:bg-[#35165c]"
+            >
+              Search
+            </button>
+
+          </div>
 
         </form>
 
-        {message && (
-          <div className="mt-6 rounded-2xl border border-green-200 bg-green-50 p-4 text-green-800">
-            {message}
-          </div>
-        )}
 
-        {error && (
-          <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-red-700">
-            {error}
-          </div>
-        )}
+        {
+          message &&
+          (
+            <div className="mt-6 rounded-2xl bg-green-50 p-4 text-green-700">
+              {message}
+            </div>
+          )
+        }
 
-        {loading ? (
-          <div className="mt-10 rounded-3xl border border-gray-200 bg-white p-8 text-gray-500">
-            Loading available rides...
-          </div>
-        ) : (
-          <div className="mt-8 space-y-6">
 
-            {rides.length ===
-              0 && (
-              <div className="rounded-[2rem] border border-gray-200 bg-white p-10 text-center shadow-sm">
-                <h2 className="text-2xl font-bold">
-                  No rides found
-                </h2>
+        {
+          error &&
+          (
+            <div className="mt-6 rounded-2xl bg-red-50 p-4 text-red-700">
+              {error}
+            </div>
+          )
+        }
 
-                <p className="mt-2 text-gray-600">
-                  Try another route or
-                  date.
-                </p>
+
+        {
+          loading
+            ? (
+              <div className="mt-8 rounded-3xl border border-gray-200 bg-white p-8">
+                Loading rides...
               </div>
-            )}
+            )
 
-            {rides.map(
-              (ride) => {
-                const hasMap =
-                  Boolean(
-                    ride
-                      .route_geometry
-                      ?.length
-                  ) &&
-                  ride.origin_lat !=
-                    null &&
-                  ride.origin_lon !=
-                    null &&
-                  ride
-                    .destination_lat !=
-                    null &&
-                  ride
-                    .destination_lon !=
-                    null;
+            : (
+              <div className="mt-8 space-y-5">
 
-                return (
-                  <article
-                    key={ride.id}
-                    className="overflow-visible rounded-[2rem] border border-gray-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg"
-                  >
+                {
+                  rides.length ===
+                  0 &&
+                  (
+                    <div className="rounded-3xl border border-dashed border-gray-300 bg-white p-10 text-center text-gray-500">
+                      No available rides match your search.
+                    </div>
+                  )
+                }
 
-                    <div className="p-6 sm:p-8">
 
-                      <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-start">
+                {
+                  rides.map(
+                    (
+                      ride
+                    ) => (
 
-                        <div className="min-w-0">
+                      <article
+                        key={
+                          ride.id
+                        }
 
-                          <div className="flex flex-wrap items-center gap-2">
+                        className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm"
+                      >
 
-                            <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">
-                              AVAILABLE
-                            </span>
+                        <div className="flex flex-wrap items-start justify-between gap-4">
 
-                            <span className="rounded-full bg-[#f1ebf7] px-3 py-1 text-xs font-semibold text-[#4f2683]">
+                          <div>
+
+                            <h2 className="text-xl font-bold">
+
                               {
                                 ride
-                                  .available_seats
-                              }{" "}
-                              SEAT
-                              {ride
-                                .available_seats !==
-                              1
-                                ? "S"
-                                : ""}
-                            </span>
+                                  .origin
+                                  .split(
+                                    ","
+                                  )[0]
+                              }
 
-                          </div>
+                              {" → "}
 
-                          <h2 className="mt-5 text-2xl font-bold leading-tight">
-                            {
-                              ride.origin
-                            }
-                          </h2>
+                              {
+                                ride
+                                  .destination
+                                  .split(
+                                    ","
+                                  )[0]
+                              }
 
-                          <div className="my-3 ml-2 h-7 border-l-2 border-dashed border-purple-200" />
+                            </h2>
 
-                          <h2 className="text-2xl font-bold leading-tight">
-                            {
-                              ride.destination
-                            }
-                          </h2>
 
-                          <p className="mt-5 text-gray-600">
-                            Driver:{" "}
-                            <span className="font-semibold text-gray-900">
+                            <p className="mt-1 text-sm text-gray-500">
+                              {
+                                prettyDate(
+                                  ride
+                                    .departure_time
+                                )
+                              }
+                            </p>
+
+
+                            <p className="mt-2 text-sm text-gray-600">
+
+                              Driver:{" "}
+
+                              <span className="font-semibold text-gray-950">
+                                {
+                                  ride
+                                    .driver
+                                    .name
+                                }
+                              </span>
+
+
                               {
                                 ride
                                   .driver
-                                  .name
-                              }
-                            </span>
-                          </p>
+                                  .rating_average
+                                  ? ` · ${
+                                      ride
+                                        .driver
+                                        .rating_average
+                                        .toFixed(
+                                          1
+                                        )
+                                    } ★ (${
+                                      ride
+                                        .driver
+                                        .rating_count
+                                    })`
 
-                          <p className="mt-1 text-gray-600">
-                            {new Date(
-                              ride
-                                .departure_time
-                            ).toLocaleString()}
-                          </p>
+                                  : " · New driver"
+                              }
+
+                            </p>
+
+                          </div>
+
+
+                          <div className="rounded-2xl bg-[#f7f2fb] px-5 py-3 text-right">
+
+                            <p className="text-xs text-[#4f2683]">
+                              Price per seat
+                            </p>
+
+
+                            <p className="text-2xl font-bold text-[#4f2683]">
+                              $
+                              {
+                                ride
+                                  .price_per_seat
+                                  .toFixed(
+                                    2
+                                  )
+                              }
+                            </p>
+
+                          </div>
 
                         </div>
 
-                        <div className="grid shrink-0 grid-cols-3 gap-2 lg:w-[330px]">
 
-                          <div className="rounded-2xl bg-gray-50 p-4 text-center">
-                            <p className="text-xs font-medium text-gray-500">
-                              DISTANCE
+                        <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+
+                          <div className="rounded-2xl bg-gray-50 p-4">
+
+                            <p className="text-xs text-gray-500">
+                              Distance
                             </p>
 
                             <p className="mt-1 font-bold">
                               {
                                 ride
                                   .distance_km
-                              }
-                              km
+                                  .toFixed(
+                                    1
+                                  )
+                              } km
                             </p>
+
                           </div>
 
-                          <div className="rounded-2xl bg-gray-50 p-4 text-center">
-                            <p className="text-xs font-medium text-gray-500">
-                              TIME
+
+                          <div className="rounded-2xl bg-gray-50 p-4">
+
+                            <p className="text-xs text-gray-500">
+                              Drive time
                             </p>
 
                             <p className="mt-1 font-bold">
-                              {ride
-                                .duration_minutes !=
-                              null
-                                ? `${Math.round(
-                                    ride
-                                      .duration_minutes
-                                  )}m`
-                                : "—"}
+                              {
+                                Math.round(
+                                  ride
+                                    .duration_minutes ??
+                                  0
+                                )
+                              } min
                             </p>
+
                           </div>
 
-                          <div className="rounded-2xl bg-[#f1ebf7] p-4 text-center">
-                            <p className="text-xs font-semibold text-[#4f2683]">
-                              FARE
+
+                          <div className="rounded-2xl bg-gray-50 p-4">
+
+                            <p className="text-xs text-gray-500">
+                              Seats available
                             </p>
 
-                            <p className="mt-1 font-bold text-[#4f2683]">
-                              $
-                              {ride
-                                .price_per_seat
-                                .toFixed(
-                                  2
-                                )}
+                            <p className="mt-1 font-bold">
+                              {
+                                ride
+                                  .available_seats
+                              }
+                              {" / "}
+                              {
+                                ride
+                                  .total_seats
+                              }
                             </p>
+
+                          </div>
+
+
+                          <div className="rounded-2xl bg-gray-50 p-4">
+
+                            <p className="text-xs text-gray-500">
+                              Vehicle
+                            </p>
+
+                            <p className="mt-1 text-sm font-semibold">
+
+                              {
+                                ride
+                                  .driver
+                                  .vehicle
+                                  ? [
+                                      ride
+                                        .driver
+                                        .vehicle
+                                        .color,
+
+                                      ride
+                                        .driver
+                                        .vehicle
+                                        .year,
+
+                                      ride
+                                        .driver
+                                        .vehicle
+                                        .make,
+
+                                      ride
+                                        .driver
+                                        .vehicle
+                                        .model,
+                                    ]
+                                      .filter(
+                                        Boolean
+                                      )
+                                      .join(
+                                        " "
+                                      )
+
+                                  : "Not added"
+                              }
+
+                            </p>
+
                           </div>
 
                         </div>
 
-                      </div>
 
-                      {hasMap && (
-                        <div className="mt-6">
+                        <div className="mt-5 grid gap-5 lg:grid-cols-[1fr_auto] lg:items-end">
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedRide(
-                                expandedRide ===
-                                  ride.id
-                                  ? null
-                                  : ride.id
+                          <AddressAutocomplete
+                            label="Your pickup address"
+
+                            value={
+                              pickupAddresses[
+                                ride.id
+                              ] ??
+                              ""
+                            }
+
+                            onChange={(
+                              value
+                            ) =>
+                              setPickupAddresses(
+                                (
+                                  previous
+                                ) => ({
+                                  ...previous,
+
+                                  [ride.id]:
+                                    value,
+                                })
                               )
                             }
-                            className="rounded-xl border border-gray-300 px-5 py-2.5 font-semibold transition hover:bg-gray-50"
-                          >
-                            {expandedRide ===
-                            ride.id
-                              ? "Hide Route"
-                              : "View Driver Route"}
-                          </button>
 
-                          {expandedRide ===
-                            ride.id && (
+                            placeholder="Where should the driver pick you up?"
+                          />
+
+
+                          <div className="flex flex-wrap gap-3">
+
+                            <button
+                              type="button"
+
+                              onClick={
+                                () =>
+                                  setExpandedRide(
+                                    expandedRide ===
+                                    ride.id
+                                      ? null
+                                      : ride.id
+                                  )
+                              }
+
+                              className="rounded-xl border border-gray-300 px-4 py-3 font-semibold hover:bg-gray-50"
+                            >
+
+                              {
+                                expandedRide ===
+                                ride.id
+                                  ? "Hide Route"
+                                  : "View Route"
+                              }
+
+                            </button>
+
+
+                            <button
+                              type="button"
+
+                              disabled={
+                                requestingRide ===
+                                ride.id ||
+                                ride.available_seats <=
+                                0
+                              }
+
+                              onClick={
+                                () =>
+                                  requestRide(
+                                    ride.id
+                                  )
+                              }
+
+                              className="rounded-xl bg-[#4f2683] px-5 py-3 font-semibold text-white hover:bg-[#35165c] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+
+                              {
+                                requestingRide ===
+                                ride.id
+                                  ? "Requesting..."
+                                  : "Request Ride"
+                              }
+
+                            </button>
+
+                          </div>
+
+                        </div>
+
+
+                        {
+                          expandedRide ===
+                            ride.id &&
+                          ride.route_geometry &&
+                          (
                             <div className="mt-5">
 
                               <RouteMap
                                 route={
                                   ride
-                                    .route_geometry ??
-                                  []
+                                    .route_geometry
                                 }
-                                origin={{
-                                  lat:
-                                    ride
-                                      .origin_lat!,
 
-                                  lon:
-                                    ride
-                                      .origin_lon!,
+                                origin={
+                                  ride.origin_lat !==
+                                    null &&
+                                  ride.origin_lon !==
+                                    null
+                                    ? {
+                                        lat:
+                                          ride.origin_lat,
 
-                                  label:
-                                    ride
-                                      .origin,
-                                }}
-                                destination={{
-                                  lat:
-                                    ride
-                                      .destination_lat!,
+                                        lon:
+                                          ride.origin_lon,
 
-                                  lon:
-                                    ride
-                                      .destination_lon!,
+                                        label:
+                                          ride.origin,
+                                      }
+                                    : null
+                                }
 
-                                  label:
-                                    ride
-                                      .destination,
-                                }}
+                                destination={
+                                  ride.destination_lat !==
+                                    null &&
+                                  ride.destination_lon !==
+                                    null
+                                    ? {
+                                        lat:
+                                          ride.destination_lat,
+
+                                        lon:
+                                          ride.destination_lon,
+
+                                        label:
+                                          ride.destination,
+                                      }
+                                    : null
+                                }
+
+                                height="340px"
                               />
 
                             </div>
-                          )}
-
-                        </div>
-                      )}
-
-                    </div>
-
-                    <div className="border-t border-gray-100 bg-gray-50/70 p-6 sm:p-8">
-
-                      <AddressAutocomplete
-                        label="Where should the driver pick you up?"
-                        value={
-                          pickupAddresses[
-                            ride.id
-                          ] || ""
-                        }
-                        onChange={(
-                          value
-                        ) =>
-                          setPickupAddresses(
-                            (
-                              previous
-                            ) => ({
-                              ...previous,
-
-                              [
-                                ride.id
-                              ]:
-                                value,
-                            })
                           )
                         }
-                        placeholder="Start typing your pickup address"
-                        required
-                      />
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          requestRide(
-                            ride.id
-                          )
-                        }
-                        disabled={
-                          requestingRide ===
-                          ride.id
-                        }
-                        className="mt-5 w-full rounded-xl bg-[#4f2683] px-6 py-3 font-semibold text-white transition hover:bg-[#35165c] disabled:opacity-50 sm:w-auto"
-                      >
-                        {requestingRide ===
-                        ride.id
-                          ? "Calculating Pickup..."
-                          : "Request This Ride"}
-                      </button>
+                      </article>
 
-                    </div>
+                    )
+                  )
+                }
 
-                  </article>
-                );
-              }
-            )}
-
-          </div>
-        )}
+              </div>
+            )
+        }
 
       </section>
+
     </main>
   );
 }

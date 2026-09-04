@@ -32,6 +32,32 @@ class UserProfileUpdate(BaseModel):
         max_length=100,
     )
 
+    vehicle_year: int | None = Field(
+        default=None,
+        ge=1980,
+        le=2100,
+    )
+
+    vehicle_make: str | None = Field(
+        default=None,
+        max_length=60,
+    )
+
+    vehicle_model: str | None = Field(
+        default=None,
+        max_length=60,
+    )
+
+    vehicle_color: str | None = Field(
+        default=None,
+        max_length=40,
+    )
+
+    license_plate: str | None = Field(
+        default=None,
+        max_length=20,
+    )
+
 
 class RoutePreviewRequest(BaseModel):
     origin: str = Field(
@@ -90,4 +116,18 @@ class RideRequestCreate(BaseModel):
     pickup_address: str = Field(
         min_length=2,
         max_length=200,
+    )
+
+
+class RatingCreate(BaseModel):
+    rated_user_id: int
+
+    score: int = Field(
+        ge=1,
+        le=5,
+    )
+
+    comment: str | None = Field(
+        default=None,
+        max_length=500,
     )
